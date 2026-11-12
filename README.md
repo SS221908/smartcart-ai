@@ -1,368 +1,126 @@
-# PayPal SmartCart
+# SmartCart AI and Recommendations
 
-PayPal SmartCart is a budget-aware shopping assistant for students and other cost-conscious shoppers. It combines teammate-owned recommendation and intake logic with a React shopping experience, AG Grid cart editing, server-side cart validation, and PayPal Sandbox checkout.
+This folder contains the shopping intake, catalog search, budget-aware product ranking, and optional sponsor connectors. Shoppers can enter any natural-language item, category, bundle, or shopping goal; there is no supported-category allowlist. The category examples in this README only illustrate the request format. The frontend can call the HTTP routes in `api.py` and use returned product IDs and URLs in the cart.
 
-The application is designed around one reliable flow:
+## What is implemented
 
-```text
-Student request
-  → teammate intake and recommendation logic
-  → normalized product catalogue
-  → product selection and comparison
-  → editable AG Grid cart
-  → budget dashboard
-  → server-side cart validation
-  → PayPal Sandbox approval and capture
-  → confirmation
+- An adaptive shopper intake that collects budget, items already owned or ingredients on hand, intended use or occasion, priorities, and must-have requirements.
+- Channel3 structured product search with an availability filter and a per-item max-price filter.
+- Category-agnostic free-text search. The API retries with a broader goal/use-case query if the detailed search returns no budget-eligible recommendations, and returns an explanation when no catalog item qualifies.
+- Channel3's conversational shopping agent token and turn endpoints for AI replies and refinements.
+- Local ranking with explicit reasons, exclusion of already-owned items, current USD prices, and a hard total-budget cap. Multiple items from the same category are allowed for requests such as grocery lists.
+- Optional Elastic hybrid search: Channel3 products are indexed and reranked with lexical + semantic retrieval using reciprocal rank fusion. If Elastic is unavailable, direct Channel3 results still work.
+- Optional Kernel browser inspection of a user-selected public HTTPS product page. It only reads the page and returns a short summary; it does not sign in, click, or buy.
+- APIMatic PayPal Context Plugin setup notes. APIMatic is a coding-agent plugin that helps Person 2 build the PayPal integration accurately; it is not a runtime AI library.
+
+Channel3 search results provide product and offer records. The product cards in the app should come from `/api/recommendations`, not arbitrary product claims in chat text. The chat response can explain and refine options; the API then returns catalog-backed product data and computes the budget again.
+
+## Start locally
+
+1. Create and activate a Python virtual environment:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
 ```
 
-## Current architecture
+2. Install the dependencies in `requirements.txt`:
 
-The teammate runtime is loaded directly into the main FastAPI process. There is one backend port; a separate recommendation server on port `8001` is not required.
+```bash
+python -m pip install -r requirements.txt
+```
+3. Copy `.env.example` to `.env` and add API keys. Never commit `.env`.
+4. Start the service:
 
-```text
-React/Vite frontend       http://localhost:5173
-Unified FastAPI backend   http://127.0.0.1:8000
+```bash
+uvicorn api:app --reload --port 8000
 ```
 
-The backend loads the teammate source from `smartcart-ai/` through `backend/teammate_runtime.py`.
+Health check: `GET http://localhost:8000/health`.
 
-### Repository structure
+With no API keys, set `SMARTCART_DEMO=true` for fictional sample items. Demo product names and prices are placeholders and must not be represented as real listings. Real Channel3 catalog search requires `CHANNEL3_API_KEY`.
 
-```text
-frontend/
-  React/Vite application
-  Product catalogue UI
-  AG Grid cart
-  Theme and 3D scene
-  PayPal checkout UI
+## Run backend tests
 
-backend/
-  main.py                 Unified FastAPI application
-  teammate_runtime.py     Loads teammate recommendation runtime
-  cart_validation.py      Authoritative cart validation
-  paypal_service.py       Server-only PayPal integration
-  test_*.py               Backend tests
+The focused tests mock Channel3, so they do not need a real API key or a network call:
 
-smartcart-ai/
-  api.py                  Teammate intake and recommendation routes
-  smartcart_agent.py      Intake, ranking, and budget logic
-  integrations/            Channel3, Elastic, and Kernel connectors
+```bash
+python -m pip install -r requirements-test.txt
+python -m unittest discover -s tests -v
 ```
 
-## Backend routes
+## API contract for Person 2
 
-All routes run on port `8000`:
+### 1. Ask the next intake question
 
-```text
-GET  /health
-GET  /api/health
+Start with the shopper's natural-language request using `POST /api/intake/start`:
 
-POST /api/intake/start
-POST /api/intake/next
-POST /api/recommendations
-
-POST /api/cart/validate
-
-POST /api/paypal/orders
-POST /api/paypal/orders/{order_id}/capture
+```json
+{"message": "Help me plan groceries for weekday lunches under $80"}
 ```
 
-The frontend calls only the unified backend. The backend invokes the teammate recommendation functions in-process.
+This extracts the obvious goal and budget, then asks for missing information. The questions adapt to general shopping; for groceries, list ingredients already on hand, and for clothing, include relevant size or fit details.
 
-## Frontend experience
+`POST /api/intake/next`
 
-The current interface includes:
-
-- Student request form with goal, budget, owned equipment, use case, priorities, device details, and must-haves.
-- Light/dark theme toggle.
-- Glassmorphism panels and responsive layout.
-- Procedural React Three Fiber showroom backdrop.
-- WebGL fallback and reduced-motion support.
-- Product catalogue cards instead of a technical comparison table.
-- Product imagery when supplied by the API, with generated visual placeholders when absent.
-- Bold price and “Why it fits” recommendation reasoning.
-- Merchant names linked to product pages when available.
-- AG Grid cart with editable quantities, row totals, and remove actions.
-- Budget dashboard with subtotal, remaining budget, progress, and over-budget warnings.
-- Explicit PayPal Sandbox checkout approval step.
-
-The internal search mode, such as `channel3_elastic_fallback`, is retained in API data for diagnostics but is not presented as the primary shopper-facing product source. The customer-facing source is the catalog item and merchant link.
-
-## Prerequisites
-
-Install locally:
-
-- Python 3.11 or newer.
-- Node.js and npm.
-- Git.
-- A PayPal Developer account for Sandbox checkout.
-- Optional: Postman for API testing.
-
-Verify installations:
-
-```powershell
-py --version
-node --version
-npm --version
+```json
+{
+  "goal": "groceries for weekday lunches",
+  "budget": 80,
+  "owns": ["rice", "olive oil"],
+  "use_case": "weekday lunches",
+  "priorities": ["vegetarian", "value"],
+  "device_details": null,
+  "must_haves": ["vegetarian"]
+}
 ```
 
-## Environment configuration
+For a clothing request, the same fields can describe a wedding outfit:
 
-Copy `.env.example` to `.env` in the project root:
-
-```powershell
-Copy-Item .env.example .env
+```json
+{
+  "goal": "wedding dress",
+  "budget": 500,
+  "owns": [],
+  "use_case": "my wedding",
+  "priorities": ["style", "comfort", "value"],
+  "device_details": "size 8, ivory",
+  "must_haves": ["floor length"]
+}
 ```
 
-Never commit `.env`. Never place PayPal secrets in frontend `VITE_*` variables.
+If a field is unanswered, the response includes `status: "needs_input"`, the field name, and the question to show. Represent an explicit answer of “none” as an empty list; `null` means it is still unanswered. In Swagger, replace the sample word `string` with a real value or `[]`; the API ignores those placeholder strings if they are submitted by mistake.
 
-### Required for demo recommendations
+### 2. Get budget-safe product recommendations
 
-```dotenv
-SMARTCART_DEMO=true
-```
+`POST /api/recommendations`
 
-Demo recommendations are fictional and must remain labeled as demo data.
+Send the same shopper fields. `owns`, `priorities`, and `must_haves` each accept an array or comma/newline-separated text. It returns product name, current price, merchant, image, product URL, fit explanation, and budget totals. Returned items are selected from the catalog and fit within the requested total budget based on the returned prices. Reconfirm price and availability before checkout.
 
-### Required for real catalog recommendations
+### 3. Use Channel3's AI agent
 
-```dotenv
-SMARTCART_DEMO=false
-CHANNEL3_API_KEY=your-channel3-key
-```
+- `POST /api/channel3/token` returns a short-lived client token. The Channel3 API key stays on the server.
+- `POST /api/channel3/turn` takes `client_token`, `message`, and an optional `conversation_id`; it returns assistant text and the conversation ID to send on the next turn.
 
-The teammate service uses Channel3 for catalog search when the key is configured.
+After intake is complete, give the agent the goal, budget, owned items, priorities, device details, and required specifications in the optional `profile` field. Use `/api/recommendations` for the final structured product cards and hard budget check.
 
-### Required for PayPal Sandbox checkout
+### 4. Optional Kernel page review
 
-```dotenv
-PAYPAL_BASE_URL=https://api-m.sandbox.paypal.com
-PAYPAL_CLIENT_ID=your-sandbox-client-id
-PAYPAL_CLIENT_SECRET=your-sandbox-client-secret
-```
+`POST /api/kernel/inspect-product` accepts a user-selected public HTTPS product URL and returns a page title, description, and short visible-text sample. Treat those details as unverified; catalog prices from Channel3 remain the product source of record.
 
-Use a PayPal Sandbox Business account and a Sandbox Personal account for testing. Do not use live PayPal credentials.
+## Partner setup notes
 
-### Optional integrations
+- **Channel3:** Set `CHANNEL3_API_KEY`. Search uses `/v1/search`, `x-api-key`, price and availability filters. Its conversational agent uses a server-created client token and conversation turns.
+- **Elastic:** Set `ELASTICSEARCH_URL` and `ELASTIC_API_KEY`. The service creates a `semantic_text` field and performs reciprocal-rank-fusion over lexical and semantic results. This requires a compatible Elastic deployment and inference endpoint.
+- **Kernel:** Set `KERNEL_API_KEY`; install the optional Python packages from `requirements.txt`. The inspector is called only when a user wants extra information from a product page.
+- **APIMatic:** See `APIMATIC_SETUP.md`. Install its PayPal Context Plugin in the coding-agent environment before Person 2 implements PayPal orders.
 
-```dotenv
-ELASTICSEARCH_URL=
-ELASTIC_API_KEY=
-ELASTIC_INDEX=smartcart-products-v1
-KERNEL_API_KEY=
-```
+The Channel3 and Kernel keys must remain server-side. The model can explain products, but prices, available items, budget arithmetic, and checkout approval remain explicit application data and rules.
 
-Elastic provides optional reranking. Kernel provides optional read-only public product-page inspection. Neither is required for the core recommendation-to-checkout flow.
+## Official integration references
 
-### Other settings
-
-```dotenv
-VITE_API_BASE_URL=http://127.0.0.1:8000
-FRONTEND_ORIGIN=http://localhost:5173
-PRODUCT_CATALOG_JSON={}
-```
-
-Recommendation responses create server-side catalog snapshots automatically. `PRODUCT_CATALOG_JSON` remains available as a fallback for direct cart-validation tests.
-
-## Local startup
-
-Start only one backend. The teammate API should not be started separately on port `8001`.
-
-### Terminal 1: backend
-
-```powershell
-cd "C:\Users\pearl\OneDrive\Documents\ChatGPT\PayPal Hacks\backend"
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-py -m pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
-```
-
-Verify:
-
-```powershell
-Invoke-RestMethod http://127.0.0.1:8000/api/health
-```
-
-The response includes backend status and teammate configuration status:
-
-```text
-status
-channel3_configured
-elastic_configured
-kernel_configured
-demo_catalog_enabled
-```
-
-### Terminal 2: frontend
-
-```powershell
-cd "C:\Users\pearl\OneDrive\Documents\ChatGPT\PayPal Hacks\frontend"
-npm install
-npm test
-npm run build
-npm run dev
-```
-
-Open:
-
-```text
-http://localhost:5173
-```
-
-## Testing the recommendation flow
-
-Test the unified backend directly:
-
-```powershell
-$body = @{
-  goal = "coding setup"
-  budget = 300
-  owns = @("monitor", "keyboard")
-  use_case = "coding for college classes"
-  priorities = @("RAM", "performance", "value")
-  device_details = ""
-  must_haves = @()
-} | ConvertTo-Json
-
-Invoke-RestMethod `
-  -Uri http://127.0.0.1:8000/api/recommendations `
-  -Method Post `
-  -ContentType "application/json" `
-  -Body $body
-```
-
-The response should contain:
-
-```text
-recommendations
-budget
-recommendation_set_id
-search_mode
-demo_data
-requires_user_approval
-```
-
-The `recommendation_set_id` connects returned product IDs and prices to later cart validation.
-
-## Testing the cart and budget flow
-
-In the browser:
-
-1. Submit a request.
-2. Select products from the catalogue cards.
-3. Add selected products to the cart.
-4. Edit quantity directly in AG Grid.
-5. Try invalid quantities such as `0`, `-1`, `1.5`, and text.
-6. Remove a product.
-7. Confirm row totals update.
-8. Confirm subtotal updates.
-9. Confirm remaining budget updates.
-10. Add enough items to exceed the budget.
-11. Confirm checkout is disabled or blocked when over budget.
-
-The backend remains authoritative. Browser totals are never trusted for payment.
-
-## Testing PayPal Sandbox checkout
-
-1. Configure fresh Sandbox credentials in `.env`.
-2. Restart the backend.
-3. Submit a recommendation request.
-4. Add a product with a verified product ID and price.
-5. Confirm the cart is within budget.
-6. Click `Approve final cart`.
-7. Open the PayPal approval link.
-8. Sign in with the Sandbox Personal buyer account.
-9. Approve the payment.
-10. Return to StudentCart.
-11. Click `I approved — capture payment`.
-12. Confirm the success state and PayPal order ID.
-
-The PayPal client ID and secret remain server-side. The browser receives only the order ID and approval URL.
-
-## Automated tests
-
-Frontend tests:
-
-```powershell
-cd frontend
-npm test
-```
-
-The current frontend suite covers:
-
-- Recommendation normalization.
-- Teammate budget-object normalization.
-- Product aliases.
-- PayPal API request handling.
-- Add/remove cart behavior.
-- Quantity validation.
-- Subtotal calculations.
-- Budget summaries.
-- Cross-layer cart validation payloads.
-
-Backend tests:
-
-```powershell
-cd backend
-..\.venv\Scripts\Activate.ps1
-py -m unittest test_cart_validation.py test_paypal_service.py
-python -m compileall .
-```
-
-## Troubleshooting
-
-### Backend health works but recommendations fail
-
-Check that the teammate runtime is configured:
-
-```dotenv
-SMARTCART_DEMO=true
-```
-
-For real catalog results, check `CHANNEL3_API_KEY`.
-
-### `/` returns 404
-
-This is normal. Use:
-
-```text
-/health
-/api/health
-/docs
-/api/recommendations
-```
-
-### PayPal capture returns 502
-
-Restart the backend after changing credentials and create a fresh PayPal order. The backend now returns PayPal error codes such as `ORDER_NOT_APPROVED` or `ORDER_ALREADY_CAPTURED`.
-
-### Port 8001 is still running
-
-Stop the old teammate Uvicorn process. The unified application should run only on port `8000`.
-
-### AG Grid or 3D dependencies are missing
-
-Run:
-
-```powershell
-cd frontend
-npm install
-```
-
-Then rebuild:
-
-```powershell
-npm run build
-```
-
-## Security rules
-
-- Never commit `.env`.
-- Never expose PayPal client secrets in React code.
-- Never trust browser prices or totals.
-- Never let recommendation logic create or capture PayPal orders.
-- Treat demo products as fictional.
-- Revalidate product IDs, prices, currencies, and quantities on the backend.
-- Rotate any credential that has been exposed in a screenshot, commit, log, or chat.
+- [Channel3 product search](https://channel3.ai/docs/guides/make-a-search)
+- [Channel3 conversational agent quickstart](https://channel3.ai/docs/conversations/quickstart)
+- [Elastic hybrid search with semantic text](https://www.elastic.co/docs/solutions/search/hybrid-semantic-text)
+- [Kernel browser documentation](https://www.kernel.sh/docs/)
+- [APIMatic PayPal Context Plugin](https://context.apimatic.io/plugins/paypal/)
